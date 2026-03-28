@@ -21,6 +21,7 @@ type LogPayload = {
 };
 
 const sourceLabels: Record<LogSource, string> = {
+  status: "Live status",
   "agent.err": "Agent stderr",
   "agent.log": "Agent stdout",
   "agent_tail.err": "Agent tail stderr",
@@ -33,6 +34,111 @@ const sourceLabels: Record<LogSource, string> = {
 
 const LOG_REFRESH_MS = 3000;
 const OVERVIEW_REFRESH_MS = 15000;
+const DIRECT_BASE_URL =
+  process.env.NEXT_PUBLIC_INGEST_DIRECT_BASE_URL?.replace(/\/+$/, "") ?? "";
+
+function isDirectBrowserMode() {
+  return Boolean(DIRECT_BASE_URL);
+}
+
+function machineDirectBaseUrl(machine: MachineCatalogEntry) {
+  if (machine.kind === "aggregator") {
+    return DIRECT_BASE_URL;
+  }
+
+  const port = machine.kind === "server" ? 8090 : 8080;
+  return `http://${machine.primaryHost}:${port}`;
+}
+
+async function fetchJson(url: string) {
+  const response = await fetch(url, { cache: "no-store" });
+  const payload = (await response.json().catch(() => null)) as
+    | Record<string, unknown>
+    | null;
+
+  if (!response.ok) {
+    throw new Error(
+      typeof payload?.error === "string"
+        ? payload.error
+        : `${response.status} ${response.statusText}`,
+    );
+  }
+
+  return payload ?? {};
+}
+
+async function fetchDirectOverview() {
+  if (!DIRECT_BASE_URL) {
+    throw new Error("NEXT_PUBLIC_INGEST_DIRECT_BASE_URL is not configured.");
+  }
+
+  const [health, fleetStatus, serverStatus] = await Promise.all([
+    fetchJson(`${DIRECT_BASE_URL}/api/health`).catch(() => null),
+    fetchJson(`${DIRECT_BASE_URL}/api/fleet-status`).catch(() => null),
+    fetchJson(`${DIRECT_BASE_URL}/api/server-status`).catch(() => null),
+  ]);
+
+  return {
+    aggregatorUrl: DIRECT_BASE_URL,
+    fetchedAt: new Date().toISOString(),
+    health,
+    fleetStatus,
+    serverStatus,
+    warnings: [],
+  } satisfies FleetOverview;
+}
+
+async function fetchDirectLogPayload(
+  machine: MachineCatalogEntry,
+  source: LogSource,
+): Promise<LogPayload> {
+  if (machine.kind === "aggregator") {
+    const [health, fleetStatus, serverStatus] = await Promise.all([
+      fetchJson(`${DIRECT_BASE_URL}/api/health`).catch((error) => ({
+        error: String(error),
+      })),
+      fetchJson(`${DIRECT_BASE_URL}/api/fleet-status`).catch((error) => ({
+        error: String(error),
+      })),
+      fetchJson(`${DIRECT_BASE_URL}/api/server-status`).catch((error) => ({
+        error: String(error),
+      })),
+    ]);
+
+    return {
+      machine,
+      source,
+      resolvedSource: "status",
+      command: `${DIRECT_BASE_URL}/api/{health,fleet-status,server-status}`,
+      output: JSON.stringify(
+        {
+          health,
+          fleetStatus,
+          serverStatus,
+        },
+        null,
+        2,
+      ),
+      fetchedAt: new Date().toISOString(),
+      note:
+        "Direct browser mode is active. This hosted view reads live status surfaces from the existing ingest backend instead of SSH logs.",
+    };
+  }
+
+  const baseUrl = machineDirectBaseUrl(machine);
+  const payload = await fetchJson(`${baseUrl}/api/status`);
+
+  return {
+    machine,
+    source,
+    resolvedSource: "status",
+    command: `${baseUrl}/api/status`,
+    output: JSON.stringify(payload, null, 2),
+    fetchedAt: new Date().toISOString(),
+    note:
+      "Direct browser mode is active. This hosted view reads the machine status API exposed by the existing ingest services.",
+  };
+}
 
 export function DashboardShell({
   initialMachines,
@@ -47,7 +153,7 @@ export function DashboardShell({
     initialMachines[0]?.name ?? "",
   );
   const [selectedSource, setSelectedSource] = useState<LogSource>(
-    initialMachines[0]?.availableLogs[0] ?? "aggregator",
+    isDirectBrowserMode() ? "status" : (initialMachines[0]?.availableLogs[0] ?? "aggregator"),
   );
   const [lineCount, setLineCount] = useState(160);
   const [logPayload, setLogPayload] = useState<LogPayload | null>(null);
@@ -67,14 +173,19 @@ export function DashboardShell({
     }
 
     if (!selectedMachine.availableLogs.includes(selectedSource)) {
-      setSelectedSource(selectedMachine.availableLogs[0]);
+      setSelectedSource(
+        isDirectBrowserMode() && selectedMachine.availableLogs.includes("status")
+          ? "status"
+          : selectedMachine.availableLogs[0],
+      );
     }
   }, [selectedMachine, selectedSource]);
 
   const refreshOverview = useCallback(async () => {
     try {
-      const response = await fetch("/api/overview", { cache: "no-store" });
-      const payload = (await response.json()) as FleetOverview;
+      const payload = isDirectBrowserMode()
+        ? await fetchDirectOverview()
+        : ((await (await fetch("/api/overview", { cache: "no-store" })).json()) as FleetOverview);
       startTransition(() => {
         setOverview(payload);
       });
@@ -102,22 +213,28 @@ export function DashboardShell({
     setLogError(null);
 
     try {
-      const params = new URLSearchParams({
-        machine: selectedMachine.name,
-        source: selectedSource,
-        lines: String(lineCount),
-      });
-      const response = await fetch(`/api/logs?${params.toString()}`, {
-        cache: "no-store",
-      });
-      const payload = await response.json();
+      const payload = isDirectBrowserMode()
+        ? await fetchDirectLogPayload(selectedMachine, selectedSource)
+        : await (async () => {
+            const params = new URLSearchParams({
+              machine: selectedMachine.name,
+              source: selectedSource,
+              lines: String(lineCount),
+            });
+            const response = await fetch(`/api/logs?${params.toString()}`, {
+              cache: "no-store",
+            });
+            const payload = await response.json();
 
-      if (!response.ok) {
-        throw new Error(payload.error || "Failed to fetch logs");
-      }
+            if (!response.ok) {
+              throw new Error(payload.error || "Failed to fetch logs");
+            }
+
+            return payload as LogPayload;
+          })();
 
       startTransition(() => {
-        setLogPayload(payload as LogPayload);
+        setLogPayload(payload);
       });
     } catch (error) {
       startTransition(() => {
@@ -288,6 +405,11 @@ export function DashboardShell({
                     {selectedMachine?.primaryHost}
                     {selectedMachine?.secondaryHost ? ` · ${selectedMachine.secondaryHost}` : ""}
                   </div>
+                  {isDirectBrowserMode() ? (
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      Browser-direct mode via {DIRECT_BASE_URL}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {selectedMachine?.availableLogs.map((source) => (
@@ -377,6 +499,11 @@ export function DashboardShell({
                   <span className="rounded-full border border-border bg-background px-3 py-1">
                     {logLoading ? "refreshing..." : "live"}
                   </span>
+                  {isDirectBrowserMode() ? (
+                    <span className="rounded-full border border-border bg-background px-3 py-1">
+                      browser direct
+                    </span>
+                  ) : null}
                 </div>
               </div>
 

@@ -42,6 +42,7 @@ export type FleetInventory = {
 export type MachineKind = "mini" | "server" | "aggregator";
 
 export type LogSource =
+  | "status"
   | "agent.err"
   | "agent.log"
   | "agent_tail.err"
@@ -93,7 +94,7 @@ export async function getMachineCatalog(): Promise<MachineCatalogEntry[]> {
     stationLabel: `Stations ${server.station_ids.join(", ")}`,
     primaryHost: server.tailnet_host,
     secondaryHost: server.lan_host,
-    availableLogs: ["upload-daemon"],
+    availableLogs: ["status", "upload-daemon"],
     notes: [
       `Ingest IP ${server.ingest_ip}`,
       `Link ${server.link_gbps}G`,
@@ -109,6 +110,7 @@ export async function getMachineCatalog(): Promise<MachineCatalogEntry[]> {
     primaryHost: mini.tailnet_host,
     secondaryHost: mini.host,
     availableLogs: [
+      "status",
       "agent.err",
       "agent.log",
       "agent_tail.err",

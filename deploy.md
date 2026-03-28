@@ -27,6 +27,7 @@ BUILD_AI_INGEST_WORKER_API_KEY=<your-worker-api-key>
 INGEST_AGGREGATOR_URL=http://10.0.3.66:8080
 INGEST_BACKEND_BASE_URL=https://<your-private-ingest-backend>
 INGEST_REMOTE_NETWORK=secondary
+NEXT_PUBLIC_INGEST_DIRECT_BASE_URL=http://ingest-server-01.taila4bcf0.ts.net:8080
 
 NEXT_PUBLIC_SENTRY_DSN=<your-sentry-dsn>
 SENTRY_DSN=<your-sentry-dsn>
@@ -117,7 +118,12 @@ This dashboard can run in two modes:
 
 1. **Self-hosted inside the ingest network**
    - the built-in Next.js routes can SSH to minis and servers directly
-2. **Frontend on Vercel**
+2. **Frontend on Vercel via existing ingest backend**
+   - set `NEXT_PUBLIC_INGEST_DIRECT_BASE_URL`
+   - browser requests go directly to the existing aggregator and machine status APIs
+   - this requires the viewer's device to be on Tailscale
+   - this mode shows live status data from the existing ingest surfaces
+3. **Frontend on Vercel via a private proxy backend**
    - set `INGEST_BACKEND_BASE_URL`
    - that backend must run inside your ingest or Tailscale network
    - Vercel should call that backend instead of SSH-ing to `.local`, LAN, or Tailnet-only hosts directly

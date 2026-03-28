@@ -22,6 +22,8 @@ function buildCommand(source: LogSource, lines: number) {
   const safeLines = Math.max(20, Math.min(lines, 400));
 
   switch (source) {
+    case "status":
+      throw new Error("status source is only available in direct browser mode");
     case "agent.err":
       return `tail -n ${safeLines} ~/ingest-agent/logs/agent.err 2>&1`;
     case "agent.log":
