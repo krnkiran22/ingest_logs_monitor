@@ -1,0 +1,163 @@
+{
+  "cluster_id": "dukaan-cluster-01",
+  "api_url": "https://api.build.ai",
+  "gcs_bucket": "buildai-india-mumbai",
+  "gcs_project": "data-470400",
+  "aggregator": {
+    "name": "aggregator",
+    "user": "buildai",
+    "lan_host": "10.0.3.66",
+    "tailnet_host": "ingest-server-01.taila4bcf0.ts.net",
+    "remote_dir": "/home/buildai/aggregator"
+  },
+  "minis": [
+    {
+      "name": "ingest-mini-1",
+      "user": "mac_mini_ingest_1",
+      "host": "ingest-mini-1.local",
+      "ingest_ip": "192.168.10.1",
+      "tailnet_host": "ingest-mini-1.taila4bcf0.ts.net",
+      "station": 1,
+      "server": "ingest-server-01",
+      "nic_mac": "1c:fd:08:73:f2:cc"
+    },
+    {
+      "name": "ingest-mini-2",
+      "user": "buildai-2",
+      "host": "ingest-mini-2.local",
+      "ingest_ip": "192.168.10.2",
+      "tailnet_host": "ingest-mini-2.taila4bcf0.ts.net",
+      "station": 1,
+      "server": "ingest-server-01",
+      "nic_mac": "1c:fd:08:73:f2:fa"
+    },
+    {
+      "name": "ingest-mini-3",
+      "user": "buildai-3",
+      "host": "ingest-mini-3.local",
+      "ingest_ip": "192.168.10.3",
+      "tailnet_host": "ingest-mini-3.taila4bcf0.ts.net",
+      "station": 1,
+      "server": "ingest-server-01",
+      "nic_mac": "1c:fd:08:7b:88:9a"
+    },
+    {
+      "name": "ingest-mini-4",
+      "user": "buildai-4",
+      "host": "ingest-mini-4.local",
+      "ingest_ip": "192.168.10.4",
+      "tailnet_host": "ingest-mini-4.taila4bcf0.ts.net",
+      "station": 2,
+      "server": "ingest-server-02",
+      "nic_mac": "1c:fd:08:7b:88:ce"
+    },
+    {
+      "name": "ingest-mini-5",
+      "user": "buildai-5",
+      "host": "ingest-mini-5.local",
+      "ingest_ip": "192.168.10.5",
+      "tailnet_host": "ingest-mini-5.taila4bcf0.ts.net",
+      "station": 2,
+      "server": "ingest-server-02",
+      "nic_mac": "1c:fd:08:7b:88:88"
+    },
+    {
+      "name": "ingest-mini-6",
+      "user": "buildai-6",
+      "host": "ingest-mini-6.local",
+      "ingest_ip": "192.168.10.6",
+      "tailnet_host": "ingest-mini-6.taila4bcf0.ts.net",
+      "station": 2,
+      "server": "ingest-server-02",
+      "nic_mac": "1c:fd:08:7b:88:be"
+    },
+    {
+      "name": "ingest-mini-7",
+      "user": "buildai-7",
+      "host": "ingest-mini-7.local",
+      "ingest_ip": "192.168.10.7",
+      "tailnet_host": "ingest-mini-7.taila4bcf0.ts.net",
+      "station": 3,
+      "server": "ingest-server-03",
+      "nic_mac": "c4:62:37:06:ce:c0"
+    },
+    {
+      "name": "ingest-mini-8",
+      "user": "buildai-8",
+      "host": "ingest-mini-8.local",
+      "ingest_ip": "192.168.10.8",
+      "tailnet_host": "ingest-mini-8.taila4bcf0.ts.net",
+      "station": 3,
+      "server": "ingest-server-03",
+      "nic_mac": "1c:fd:08:7b:88:76"
+    },
+    {
+      "name": "ingest-mini-9",
+      "user": "buildai-9",
+      "host": "ingest-mini-9.local",
+      "ingest_ip": "192.168.10.9",
+      "tailnet_host": "ingest-mini-9.taila4bcf0.ts.net",
+      "station": 3,
+      "server": "ingest-server-03",
+      "nic_mac": "1c:fd:08:7b:88:ae"
+    },
+    {
+      "name": "ingest-mini-10",
+      "user": "buildai-10",
+      "host": "ingest-mini-10.local",
+      "ingest_ip": "192.168.10.10",
+      "tailnet_host": "ingest-mini-10.taila4bcf0.ts.net",
+      "station": 4,
+      "server": "ingest-server-04",
+      "nic_mac": "1c:fd:08:7b:88:70"
+    },
+    {
+      "name": "ingest-mini-11",
+      "user": "buildai-11",
+      "host": "ingest-mini-11.local",
+      "ingest_ip": "192.168.10.11",
+      "tailnet_host": "ingest-mini-11.taila4bcf0.ts.net",
+      "station": 4,
+      "server": "ingest-server-04",
+      "nic_mac": "1c:fd:08:73:f3:48"
+    }
+  ],
+  "servers": [
+    {
+      "name": "ingest-server-01",
+      "user": "buildai",
+      "lan_host": "10.0.3.66",
+      "tailnet_host": "ingest-server-01.taila4bcf0.ts.net",
+      "ingest_ip": "192.168.10.66",
+      "station_ids": [1],
+      "link_gbps": 10
+    },
+    {
+      "name": "ingest-server-02",
+      "user": "buildai",
+      "lan_host": "10.0.5.131",
+      "tailnet_host": "ingest-server-02.taila4bcf0.ts.net",
+      "ingest_ip": "192.168.10.131",
+      "station_ids": [2],
+      "link_gbps": 10
+    },
+    {
+      "name": "ingest-server-03",
+      "user": "buildai",
+      "lan_host": "10.0.4.190",
+      "tailnet_host": "ingest-server-03.taila4bcf0.ts.net",
+      "ingest_ip": "192.168.10.190",
+      "station_ids": [3],
+      "link_gbps": 5
+    },
+    {
+      "name": "ingest-server-04",
+      "user": "buildai",
+      "lan_host": "10.0.4.64",
+      "tailnet_host": "ingest-server-04.taila4bcf0.ts.net",
+      "ingest_ip": "192.168.10.64",
+      "station_ids": [4],
+      "link_gbps": 5
+    }
+  ]
+}

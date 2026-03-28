@@ -1,5 +1,4 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
+import inventoryData from "@/data/fleet-inventory.json";
 
 export type MiniInventory = {
   name: string;
@@ -63,15 +62,10 @@ export type MachineCatalogEntry = {
   notes: string[];
 };
 
-const INVENTORY_PATH = path.resolve(process.cwd(), "..", "fleet", "inventory.json");
-
-let inventoryPromise: Promise<FleetInventory> | null = null;
+const INVENTORY = inventoryData as FleetInventory;
 
 export async function getFleetInventory(): Promise<FleetInventory> {
-  inventoryPromise ??= readFile(INVENTORY_PATH, "utf8").then(
-    (raw) => JSON.parse(raw) as FleetInventory,
-  );
-  return inventoryPromise;
+  return INVENTORY;
 }
 
 export async function getMachineCatalog(): Promise<MachineCatalogEntry[]> {
