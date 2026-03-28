@@ -24,10 +24,6 @@ export async function fetchBackendJson<T>(
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     cache: "no-store",
-    headers: {
-      Accept: "application/json",
-      ...(init?.headers ?? {}),
-    },
   });
 
   const payload = (await response.json().catch(() => null)) as
