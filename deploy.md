@@ -25,6 +25,7 @@ BUILD_AI_INGEST_MINI_PASSWORD=<your-mini-password>
 BUILD_AI_INGEST_SERVER_PASSWORD=<your-server-password>
 BUILD_AI_INGEST_WORKER_API_KEY=<your-worker-api-key>
 INGEST_AGGREGATOR_URL=http://10.0.3.66:8080
+INGEST_BACKEND_BASE_URL=https://<your-private-ingest-backend>
 INGEST_REMOTE_NETWORK=secondary
 
 NEXT_PUBLIC_SENTRY_DSN=<your-sentry-dsn>
@@ -110,7 +111,17 @@ Check these first:
 4. the site has actually received fresh traffic after deployment
 5. you are looking at the correct Sentry project and environment
 
-## 8. Cost Note
+## 8. Private Network Requirement
+
+This dashboard can run in two modes:
+
+1. **Self-hosted inside the ingest network**
+   - the built-in Next.js routes can SSH to minis and servers directly
+2. **Frontend on Vercel**
+   - set `INGEST_BACKEND_BASE_URL`
+   - that backend must run inside your ingest or Tailscale network
+   - Vercel should call that backend instead of SSH-ing to `.local`, LAN, or Tailnet-only hosts directly
+## 9. Cost Note
 
 `1.0` trace sampling is useful for initial validation.
 

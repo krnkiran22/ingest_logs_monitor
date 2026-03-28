@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { fetchBackendJson, hasExternalBackend } from "@/lib/backend";
 import type { LogSource } from "@/lib/fleet";
 import { readRemoteLog } from "@/lib/remote";
 
@@ -25,6 +26,17 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    if (hasExternalBackend()) {
+      const params = new URLSearchParams({
+        machine,
+        source,
+        lines: String(lines),
+      });
+      return NextResponse.json(
+        await fetchBackendJson(`/api/logs?${params.toString()}`),
+      );
+    }
+
     const payload = await readRemoteLog(machine, source, lines);
     return NextResponse.json(payload);
   } catch (error) {
