@@ -1,6 +1,8 @@
 import { Client } from "ssh2";
 import { getEnv } from "@/lib/env";
 import { getMachineByName, type LogSource, type MachineCatalogEntry } from "@/lib/fleet";
+import { parseJsonResponse } from "@/lib/http";
+import { sanitizeLogOutput, summarizeStatusPayload } from "@/lib/log-sanitize";
 
 function getPassword(machine: MachineCatalogEntry) {
   if (machine.kind === "mini") {
@@ -22,8 +24,6 @@ function buildCommand(source: LogSource, lines: number) {
   const safeLines = Math.max(20, Math.min(lines, 400));
 
   switch (source) {
-    case "status":
-      throw new Error("status source is only available in direct browser mode");
     case "agent.err":
       return `tail -n ${safeLines} ~/ingest-agent/logs/agent.err 2>&1`;
     case "agent.log":
@@ -40,6 +40,47 @@ function buildCommand(source: LogSource, lines: number) {
       return `journalctl -u upload-daemon -n ${safeLines} --no-pager -o short-iso 2>&1`;
     case "aggregator":
       return `journalctl -u aggregator -n ${safeLines} --no-pager -o short-iso 2>&1`;
+    case "status":
+      throw new Error("status fetch must use the status API path");
+  }
+}
+
+function getStatusUrl(machine: MachineCatalogEntry, host: string) {
+  if (machine.kind === "mini") {
+    return `http://${host}:8080/api/status`;
+  }
+
+  if (machine.kind === "server") {
+    return `http://${host}:8090/api/status`;
+  }
+
+  const aggregatorUrl = getEnv("INGEST_AGGREGATOR_URL");
+  return `${aggregatorUrl || `http://${host}:8080`}/api/health`;
+}
+
+async function fetchStatus(machine: MachineCatalogEntry) {
+  const primaryHost = getHost(machine);
+  const fallbackHost =
+    machine.secondaryHost && machine.secondaryHost !== primaryHost ? machine.secondaryHost : null;
+
+  async function fetchOnce(host: string) {
+    const response = await fetch(getStatusUrl(machine, host), {
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+    });
+    return parseJsonResponse<Record<string, unknown>>(
+      response,
+      `Status API on ${host} returned an empty response.`,
+    );
+  }
+
+  try {
+    return await fetchOnce(primaryHost);
+  } catch (error) {
+    if (!fallbackHost) {
+      throw error;
+    }
+    return fetchOnce(fallbackHost);
   }
 }
 
@@ -134,6 +175,15 @@ export async function readRemoteLog(
   }
 
   async function fetchOne(candidate: LogSource) {
+    if (candidate === "status") {
+      const payload = await fetchStatus(targetMachine);
+      return {
+        candidate,
+        command: getStatusUrl(targetMachine, getHost(targetMachine)),
+        output: summarizeStatusPayload(targetMachine, payload),
+      };
+    }
+
     const command = buildCommand(candidate, lines);
     const output = await execRemote(targetMachine, command);
     return { candidate, command, output };
@@ -147,10 +197,10 @@ export async function readRemoteLog(
       source,
       resolvedSource: primary.candidate,
       command: primary.command,
-      output: primary.output,
+      output: sanitizeLogOutput(targetMachine, primary.candidate, primary.output),
       fetchedAt: new Date().toISOString(),
       note: primary.output.trim()
-        ? ""
+        ? "Showing filtered operational lines only."
         : "Selected file is empty.",
     };
   }
@@ -179,9 +229,9 @@ export async function readRemoteLog(
         source,
         resolvedSource: attempt.candidate,
         command: attempt.command,
-        output: attempt.output,
+        output: sanitizeLogOutput(targetMachine, attempt.candidate, attempt.output),
         fetchedAt: new Date().toISOString(),
-        note: `Selected file "${source}" is empty. Showing "${attempt.candidate}" instead.`,
+        note: `Selected file "${source}" is empty. Showing filtered operational lines from "${attempt.candidate}" instead.`,
       };
     }
   }
@@ -191,7 +241,7 @@ export async function readRemoteLog(
     source,
     resolvedSource: primary.candidate,
     command: primary.command,
-    output: primary.output,
+    output: sanitizeLogOutput(targetMachine, primary.candidate, primary.output),
     fetchedAt: new Date().toISOString(),
     note: `Selected file "${source}" is empty and no non-empty fallback log was found.`,
   };

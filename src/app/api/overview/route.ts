@@ -5,9 +5,16 @@ import { getFleetOverview } from "@/lib/overview";
 export const runtime = "nodejs";
 
 export async function GET() {
-  if (hasExternalBackend()) {
-    return NextResponse.json(await fetchBackendJson("/api/overview"));
-  }
+  try {
+    if (hasExternalBackend()) {
+      return NextResponse.json(await fetchBackendJson("/api/overview"));
+    }
 
-  return NextResponse.json(await getFleetOverview());
+    return NextResponse.json(await getFleetOverview());
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500 },
+    );
+  }
 }

@@ -1,4 +1,5 @@
 import { getEnv } from "@/lib/env";
+import { parseJsonResponse } from "@/lib/http";
 
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
@@ -26,17 +27,8 @@ export async function fetchBackendJson<T>(
     cache: "no-store",
   });
 
-  const payload = (await response.json().catch(() => null)) as
-    | Record<string, unknown>
-    | null;
-
-  if (!response.ok) {
-    const message =
-      typeof payload?.error === "string"
-        ? payload.error
-        : `${response.status} ${response.statusText}`;
-    throw new Error(message);
-  }
-
-  return payload as T;
+  return parseJsonResponse<T>(
+    response,
+    `Backend response for ${path} was empty.`,
+  );
 }

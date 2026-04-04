@@ -1,5 +1,6 @@
 import { getEnv } from "@/lib/env";
 import { getDefaultAggregatorUrl, getFleetInventory } from "@/lib/fleet";
+import { parseJsonResponse } from "@/lib/http";
 
 export type FleetOverview = {
   aggregatorUrl: string;
@@ -16,11 +17,10 @@ async function fetchJson(url: string) {
     signal: AbortSignal.timeout(8000),
   });
 
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
-  }
-
-  return response.json() as Promise<Record<string, unknown>>;
+  return parseJsonResponse<Record<string, unknown>>(
+    response,
+    `Overview response from ${url} was empty.`,
+  );
 }
 
 export async function getFleetOverview(): Promise<FleetOverview> {

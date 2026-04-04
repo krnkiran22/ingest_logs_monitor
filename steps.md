@@ -120,7 +120,7 @@ I will:
 3. keep the integration clean for this repo
 4. verify lint and build
 5. make sure the dashboard still behaves correctly
-
+y
 ## Phase 2 Later
 
 After the dashboard is done, we can add Sentry to:

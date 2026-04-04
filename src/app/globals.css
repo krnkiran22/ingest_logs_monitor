@@ -55,6 +55,7 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --font-display: var(--font-ui), "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   --font-sans: var(--font-ui), "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, "Noto Sans", sans-serif;
   --font-mono: var(--font-code), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
@@ -64,11 +65,14 @@
 }
 
 html {
-  background: var(--background);
+  background:
+    radial-gradient(circle at top left, rgba(32, 79, 255, 0.05), transparent 28%),
+    radial-gradient(circle at top right, rgba(15, 23, 42, 0.04), transparent 24%),
+    var(--background);
 }
 
 body {
-  background: var(--background);
+  background: transparent;
   color: var(--foreground);
   font-family: var(--font-sans);
 }
@@ -86,6 +90,10 @@ select {
 
 ::selection {
   background: color-mix(in srgb, var(--info) 18%, white);
+}
+
+.font-display {
+  font-family: var(--font-display);
 }
 
 .status-success {

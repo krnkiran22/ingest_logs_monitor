@@ -1,13 +1,9 @@
 "use client";
 
-import {
-  useCallback,
-  startTransition,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import type { MachineCatalogEntry, LogSource } from "@/lib/fleet";
+import { parseJsonResponse } from "@/lib/http";
+import { summarizeStatusPayload } from "@/lib/log-sanitize";
 import type { FleetOverview } from "@/lib/overview";
 
 type LogPayload = {
@@ -18,6 +14,23 @@ type LogPayload = {
   output: string;
   fetchedAt: string;
   note?: string;
+};
+
+type MachineBoardItem = {
+  machineName: string;
+  status: "success" | "warning" | "error" | "neutral" | "info";
+  headline: string;
+  detail: string;
+  loading: boolean;
+};
+
+type MachineHistoryItem = {
+  machineName: string;
+  source: LogSource;
+  lines: string[];
+  fetchedAt?: string;
+  loading: boolean;
+  error?: string;
 };
 
 const sourceLabels: Record<LogSource, string> = {
@@ -32,13 +45,76 @@ const sourceLabels: Record<LogSource, string> = {
   aggregator: "Aggregator journal",
 };
 
-const LOG_REFRESH_MS = 3000;
 const OVERVIEW_REFRESH_MS = 15000;
+const LOG_REFRESH_MS = 3000;
 const DIRECT_BASE_URL =
   process.env.NEXT_PUBLIC_INGEST_DIRECT_BASE_URL?.replace(/\/+$/, "") ?? "";
 
 function isDirectBrowserMode() {
   return Boolean(DIRECT_BASE_URL);
+}
+
+function classifyLogLine(line: string) {
+  if (/\b(error|failed|failure|blocked|action required|timeout|mismatch|invalid argument)\b/i.test(line)) {
+    return "error";
+  }
+  if (/\b(warn|warning|retry|offline|degraded)\b/i.test(line)) {
+    return "warning";
+  }
+  if (/\b(done|ok|online|uploaded|processed|completed|ready)\b/i.test(line)) {
+    return "success";
+  }
+  return "neutral";
+}
+
+function deriveBoardStatus(lines: string[]) {
+  let hasWarning = false;
+  let hasSuccess = false;
+
+  for (const line of lines) {
+    const level = classifyLogLine(line);
+    if (level === "error") {
+      return "error" as const;
+    }
+    if (level === "warning") {
+      hasWarning = true;
+    }
+    if (level === "success") {
+      hasSuccess = true;
+    }
+  }
+
+  if (hasWarning) {
+    return "warning" as const;
+  }
+  if (hasSuccess) {
+    return "success" as const;
+  }
+  return "neutral" as const;
+}
+
+function compactMetric(value: unknown, fallback = "0") {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+  return String(value);
+}
+
+function getFleetStat(overview: FleetOverview, key: string) {
+  const stats = (overview.fleetStatus?.stats as Record<string, unknown> | undefined) ?? {};
+  return compactMetric(stats[key]);
+}
+
+function getHostLabel(url: string | null | undefined) {
+  if (!url) {
+    return "-";
+  }
+
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
+  }
 }
 
 function machineDirectBaseUrl(machine: MachineCatalogEntry) {
@@ -52,19 +128,10 @@ function machineDirectBaseUrl(machine: MachineCatalogEntry) {
 
 async function fetchJson(url: string) {
   const response = await fetch(url, { cache: "no-store" });
-  const payload = (await response.json().catch(() => null)) as
-    | Record<string, unknown>
-    | null;
-
-  if (!response.ok) {
-    throw new Error(
-      typeof payload?.error === "string"
-        ? payload.error
-        : `${response.status} ${response.statusText}`,
-    );
-  }
-
-  return payload ?? {};
+  return parseJsonResponse<Record<string, unknown>>(
+    response,
+    `Received an empty response from ${url}.`,
+  );
 }
 
 async function fetchDirectOverview() {
@@ -110,18 +177,14 @@ async function fetchDirectLogPayload(
       source,
       resolvedSource: "status",
       command: `${DIRECT_BASE_URL}/api/{health,fleet-status,server-status}`,
-      output: JSON.stringify(
-        {
-          health,
-          fleetStatus,
-          serverStatus,
-        },
-        null,
-        2,
-      ),
+      output: summarizeStatusPayload(machine, {
+        health,
+        fleetStatus,
+        serverStatus,
+      }),
       fetchedAt: new Date().toISOString(),
       note:
-        "Direct browser mode is active. This hosted view reads live status surfaces from the existing ingest backend instead of SSH logs.",
+        "Direct browser mode is active. Showing only operational summary lines from the existing ingest backend.",
     };
   }
 
@@ -133,10 +196,80 @@ async function fetchDirectLogPayload(
     source,
     resolvedSource: "status",
     command: `${baseUrl}/api/status`,
-    output: JSON.stringify(payload, null, 2),
+    output: summarizeStatusPayload(machine, payload),
     fetchedAt: new Date().toISOString(),
     note:
-      "Direct browser mode is active. This hosted view reads the machine status API exposed by the existing ingest services.",
+      "Direct browser mode is active. Showing only operational summary lines from the machine status API.",
+  };
+}
+
+function buildBoardItem(machine: MachineCatalogEntry, payload: LogPayload | null, error?: string) {
+  if (error) {
+    return {
+      machineName: machine.name,
+      status: "error" as const,
+      headline: "Fetch failed",
+      detail: error,
+      loading: false,
+    };
+  }
+
+  const lines = (payload?.output ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const status = deriveBoardStatus(lines);
+  const headline =
+    lines.find((line) => classifyLogLine(line) === "error") ??
+    lines.find((line) => classifyLogLine(line) === "warning") ??
+    lines[0] ??
+    "No current status";
+  const detail =
+    lines.find((line) => line !== headline) ??
+    (machine.kind === "mini" ? "No active mini issues" : "No active server issues");
+
+  return {
+    machineName: machine.name,
+    status,
+    headline,
+    detail,
+    loading: false,
+  };
+}
+
+function getDefaultHistorySource(machine: MachineCatalogEntry): LogSource {
+  if (machine.kind === "aggregator") {
+    return "aggregator";
+  }
+  if (machine.kind === "server") {
+    return "upload-daemon";
+  }
+  return "agent.err";
+}
+
+function buildHistoryItem(machine: MachineCatalogEntry, payload: LogPayload | null, error?: string) {
+  if (error) {
+    return {
+      machineName: machine.name,
+      source: getDefaultHistorySource(machine),
+      lines: [error],
+      loading: false,
+      error,
+    };
+  }
+
+  const lines = (payload?.output ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-12);
+
+  return {
+    machineName: machine.name,
+    source: payload?.resolvedSource ?? getDefaultHistorySource(machine),
+    lines: lines.length ? lines : ["No recent logs"],
+    fetchedAt: payload?.fetchedAt,
+    loading: false,
   };
 }
 
@@ -149,43 +282,17 @@ export function DashboardShell({
 }) {
   const [machines] = useState(initialMachines);
   const [overview, setOverview] = useState(initialOverview);
-  const [selectedMachineName, setSelectedMachineName] = useState(
-    initialMachines[0]?.name ?? "",
-  );
-  const [selectedSource, setSelectedSource] = useState<LogSource>(
-    isDirectBrowserMode() ? "status" : (initialMachines[0]?.availableLogs[0] ?? "aggregator"),
-  );
-  const [lineCount, setLineCount] = useState(160);
-  const [logPayload, setLogPayload] = useState<LogPayload | null>(null);
-  const [logLoading, setLogLoading] = useState(false);
-  const [logError, setLogError] = useState<string | null>(null);
-  const [followLog, setFollowLog] = useState(true);
-  const logViewportRef = useRef<HTMLDivElement | null>(null);
-
-  const selectedMachine =
-    machines.find((machine) => machine.name === selectedMachineName) ?? machines[0];
-
-  const visibleMachines = machines;
-
-  useEffect(() => {
-    if (!selectedMachine) {
-      return;
-    }
-
-    if (!selectedMachine.availableLogs.includes(selectedSource)) {
-      setSelectedSource(
-        isDirectBrowserMode() && selectedMachine.availableLogs.includes("status")
-          ? "status"
-          : selectedMachine.availableLogs[0],
-      );
-    }
-  }, [selectedMachine, selectedSource]);
+  const [machineBoard, setMachineBoard] = useState<Record<string, MachineBoardItem>>({});
+  const [machineHistory, setMachineHistory] = useState<Record<string, MachineHistoryItem>>({});
 
   const refreshOverview = useCallback(async () => {
     try {
       const payload = isDirectBrowserMode()
         ? await fetchDirectOverview()
-        : ((await (await fetch("/api/overview", { cache: "no-store" })).json()) as FleetOverview);
+        : await parseJsonResponse<FleetOverview>(
+            await fetch("/api/overview", { cache: "no-store" }),
+            "Overview response was empty.",
+          );
       startTransition(() => {
         setOverview(payload);
       });
@@ -195,6 +302,8 @@ export function DashboardShell({
   }, []);
 
   useEffect(() => {
+    void refreshOverview();
+
     const timer = window.setInterval(() => {
       void refreshOverview();
     }, OVERVIEW_REFRESH_MS);
@@ -202,69 +311,157 @@ export function DashboardShell({
     return () => window.clearInterval(timer);
   }, [refreshOverview]);
 
-  const refreshLogs = useCallback(async (silent = false) => {
-    if (!selectedMachine) {
-      return;
-    }
+  const refreshMachineBoard = useCallback(async () => {
+    const targets = machines.filter((machine) => machine.availableLogs.includes("status"));
 
-    if (!silent) {
-      setLogLoading(true);
-    }
-    setLogError(null);
-
-    try {
-      const payload = isDirectBrowserMode()
-        ? await fetchDirectLogPayload(selectedMachine, selectedSource)
-        : await (async () => {
-            const params = new URLSearchParams({
-              machine: selectedMachine.name,
-              source: selectedSource,
-              lines: String(lineCount),
-            });
-            const response = await fetch(`/api/logs?${params.toString()}`, {
-              cache: "no-store",
-            });
-            const payload = await response.json();
-
-            if (!response.ok) {
-              throw new Error(payload.error || "Failed to fetch logs");
-            }
-
-            return payload as LogPayload;
-          })();
-
-      startTransition(() => {
-        setLogPayload(payload);
+    startTransition(() => {
+      setMachineBoard((current) => {
+        const next = { ...current };
+        for (const machine of targets) {
+          next[machine.name] = current[machine.name] ?? {
+            machineName: machine.name,
+            status: "neutral",
+            headline: "Loading status",
+            detail: machine.stationLabel,
+            loading: true,
+          };
+          next[machine.name] = { ...next[machine.name], loading: true };
+        }
+        return next;
       });
-    } catch (error) {
-      startTransition(() => {
-        setLogPayload(null);
-        setLogError(error instanceof Error ? error.message : String(error));
+    });
+
+    const updates = await Promise.all(
+      targets.map(async (machine) => {
+        try {
+          const params = new URLSearchParams({
+            machine: machine.name,
+            source: "status",
+            lines: "40",
+          });
+          const response = await fetch(`/api/logs?${params.toString()}`, {
+            cache: "no-store",
+          });
+          const payload = await parseJsonResponse<LogPayload>(
+            response,
+            `Status response for ${machine.name} was empty.`,
+          );
+
+          return [machine.name, buildBoardItem(machine, payload)] as const;
+        } catch (error) {
+          return [
+            machine.name,
+            buildBoardItem(
+              machine,
+              null,
+              error instanceof Error ? error.message : String(error),
+            ),
+          ] as const;
+        }
+      }),
+    );
+
+    startTransition(() => {
+      setMachineBoard((current) => {
+        const next = { ...current };
+        for (const [machineName, item] of updates) {
+          next[machineName] = item;
+        }
+        return next;
       });
-    } finally {
-      if (!silent) {
-        setLogLoading(false);
-      }
-    }
-  }, [lineCount, selectedMachine, selectedSource]);
+    });
+  }, [machines]);
 
   useEffect(() => {
-    void refreshLogs(false);
-  }, [selectedMachine, selectedSource, lineCount, refreshLogs]);
+    void refreshMachineBoard();
 
-  useEffect(() => {
     const timer = window.setInterval(() => {
-      void refreshLogs(true);
+      void refreshMachineBoard();
     }, LOG_REFRESH_MS);
 
     return () => window.clearInterval(timer);
-  }, [refreshLogs]);
+  }, [refreshMachineBoard]);
+
+  const refreshMachineHistory = useCallback(async () => {
+    startTransition(() => {
+      setMachineHistory((current) => {
+        const next = { ...current };
+        for (const machine of machines) {
+          next[machine.name] = current[machine.name] ?? {
+            machineName: machine.name,
+            source: getDefaultHistorySource(machine),
+            lines: [],
+            loading: true,
+          };
+          next[machine.name] = { ...next[machine.name], loading: true };
+        }
+        return next;
+      });
+    });
+
+    const updates = await Promise.all(
+      machines.map(async (machine) => {
+        try {
+          const defaultSource = getDefaultHistorySource(machine);
+
+          const payload = isDirectBrowserMode()
+            ? await fetchDirectLogPayload(machine, "status")
+            : await (async () => {
+                const params = new URLSearchParams({
+                  machine: machine.name,
+                  source: defaultSource,
+                  lines: "24",
+                });
+                const response = await fetch(`/api/logs?${params.toString()}`, {
+                  cache: "no-store",
+                });
+                return parseJsonResponse<LogPayload>(
+                  response,
+                  `Log response for ${machine.name} was empty.`,
+                );
+              })();
+
+          return [machine.name, buildHistoryItem(machine, payload)] as const;
+        } catch (error) {
+          return [
+            machine.name,
+            buildHistoryItem(
+              machine,
+              null,
+              error instanceof Error ? error.message : String(error),
+            ),
+          ] as const;
+        }
+      }),
+    );
+
+    startTransition(() => {
+      setMachineHistory((current) => {
+        const next = { ...current };
+        for (const [machineName, item] of updates) {
+          next[machineName] = item;
+        }
+        return next;
+      });
+    });
+  }, [machines]);
+
+  useEffect(() => {
+    void refreshMachineHistory();
+
+    const timer = window.setInterval(() => {
+      void refreshMachineHistory();
+    }, LOG_REFRESH_MS);
+
+    return () => window.clearInterval(timer);
+  }, [refreshMachineHistory]);
 
   useEffect(() => {
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         void refreshOverview();
-        void refreshLogs(true);
+        void refreshMachineBoard();
+        void refreshMachineHistory();
       }
     };
 
@@ -275,15 +472,7 @@ export function DashboardShell({
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("focus", onVisibilityChange);
     };
-  }, [refreshLogs, refreshOverview]);
-
-  useEffect(() => {
-    if (!followLog || !logViewportRef.current) {
-      return;
-    }
-
-    logViewportRef.current.scrollTop = logViewportRef.current.scrollHeight;
-  }, [followLog, logPayload?.output, logPayload?.fetchedAt]);
+  }, [refreshMachineBoard, refreshMachineHistory, refreshOverview]);
 
   const minis = Array.isArray(overview.fleetStatus?.minis)
     ? (overview.fleetStatus.minis as Array<{ online?: boolean }>)
@@ -297,30 +486,38 @@ export function DashboardShell({
     servers.length || machines.filter((machine) => machine.kind === "server").length;
   const minisOnline = minis.filter((machine) => Boolean(machine.online)).length;
   const serversOnline = servers.filter((machine) => Boolean(machine.online)).length;
-
-  const rawLines = (logError
-    ? [`ERROR: ${logError}`]
-    : (logPayload?.output || "No log output yet.").split(/\r?\n/)).filter(Boolean);
-  const filteredLines = rawLines;
+  const aggregatorStatus = String(overview.health?.status ?? "unknown");
+  const statusTone =
+    aggregatorStatus.toLowerCase() === "ok"
+      ? "success"
+      : overview.warnings.length > 0
+        ? "warning"
+        : "neutral";
+  const snapshotRows = [
+    { label: "Inserted", value: getFleetStat(overview, "cards_inserted") },
+    { label: "Done", value: getFleetStat(overview, "cards_done") },
+    { label: "Errors", value: getFleetStat(overview, "cards_error") },
+    { label: "Copying", value: getFleetStat(overview, "rsync_active") },
+  ];
+  const aggregatorMachine = machines.find((machine) => machine.kind === "aggregator");
 
   return (
-    <main className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto flex max-w-[1720px] flex-col gap-6 px-4 py-6 md:px-8">
-        <header className="rounded-[28px] border border-border bg-card px-5 py-5 shadow-[0_14px_40px_rgba(15,23,42,0.05)] md:px-7">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+    <main className="min-h-screen text-foreground">
+      <div className="mx-auto max-w-[1760px] px-4 py-4 md:px-6">
+        <header className="rounded-[28px] border border-white/80 bg-white/92 px-5 py-4 shadow-[0_18px_60px_rgba(15,23,42,0.06)] backdrop-blur md:px-6">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div>
-              <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
-                Build AI
+              <div className="text-[11px] font-medium uppercase tracking-[0.22em] text-muted-foreground">
+                Build AI Ingest
               </div>
-              <h1 className="mt-2 text-3xl font-semibold tracking-[-0.03em] md:text-4xl">
-                Ingest Monitor Dashboard
+              <h1 className="font-display mt-1 text-[2rem] font-semibold tracking-[-0.04em] md:text-[2.35rem]">
+                Fleet Logs
               </h1>
-              <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
-                Organized around the existing ingest backend surfaces only: aggregator state,
-                upload-daemon status, and log files already present on the minis and servers.
+              <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+                Aggregator, servers, and all 11 Mac minis on one page with recent logs visible directly.
               </p>
             </div>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
               <MetricCard
                 label="Minis online"
                 value={`${minisOnline}/${totalMiniCount}`}
@@ -338,233 +535,77 @@ export function DashboardShell({
               />
               <MetricCard
                 label="Aggregator"
-                value={String(overview.health?.status ?? "unknown")}
-                tone={
-                  String(overview.health?.status ?? "").toLowerCase() === "ok"
-                    ? "success"
-                    : "neutral"
-                }
+                value={aggregatorStatus}
+                tone={statusTone}
               />
             </div>
           </div>
         </header>
 
-        <section className="grid gap-6 xl:grid-cols-[300px_minmax(0,1fr)_320px]">
-          <aside className="rounded-[28px] border border-border bg-card p-4 shadow-[0_14px_40px_rgba(15,23,42,0.04)]">
-            <div className="mb-4 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              Machines
+        <section className="mt-4 space-y-4">
+          <section className="rounded-[28px] border border-white/80 bg-white/95 p-4 shadow-[0_16px_48px_rgba(15,23,42,0.06)] backdrop-blur md:p-5">
+            <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+              {snapshotRows.map((item) => (
+                <CompactStat key={item.label} label={item.label} value={item.value} />
+              ))}
             </div>
-            <div className="space-y-2">
-              {visibleMachines.map((machine) => {
-                const selected = machine.name === selectedMachine?.name;
-                return (
-                  <button
-                    key={machine.name}
-                    type="button"
-                    onClick={() => setSelectedMachineName(machine.name)}
-                    className={`w-full rounded-2xl border px-3 py-3 text-left transition ${
-                      selected
-                        ? "border-foreground bg-foreground text-background"
-                        : "border-border bg-background hover:bg-secondary"
-                    }`}
+            {overview.warnings.length ? (
+              <div className="mt-3 space-y-2">
+                {overview.warnings.map((warning) => (
+                  <div
+                    key={warning}
+                    className="rounded-2xl border border-[color:var(--warning)] bg-[color:var(--warning-muted)] px-3 py-2 text-sm text-[color:var(--warning-foreground)]"
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-semibold">{machine.name}</div>
-                        <div
-                          className={`text-xs ${selected ? "text-white/70" : "text-muted-foreground"}`}
-                        >
-                          {machine.stationLabel}
-                        </div>
-                      </div>
-                      <span
-                        className={`rounded-full border px-2 py-0.5 text-[11px] ${
-                          selected ? "border-white/20 text-white/80" : "status-neutral"
-                        }`}
-                      >
-                        {machine.kind}
-                      </span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </aside>
-
-          <section className="rounded-[28px] border border-border bg-card p-4 shadow-[0_14px_40px_rgba(15,23,42,0.04)] md:p-5">
-            <div className="flex flex-col gap-4 border-b border-border pb-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                <div>
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                    Live log reader
+                    {warning}
                   </div>
-                  <h2 className="mt-2 text-2xl font-semibold tracking-[-0.02em]">
-                    {selectedMachine?.name}
-                  </h2>
-                  <div className="mt-1 text-sm text-muted-foreground">
-                    {selectedMachine?.primaryHost}
-                    {selectedMachine?.secondaryHost ? ` · ${selectedMachine.secondaryHost}` : ""}
-                  </div>
-                  {isDirectBrowserMode() ? (
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      Browser-direct mode via {DIRECT_BASE_URL}
-                    </div>
-                  ) : null}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {selectedMachine?.availableLogs.map((source) => (
-                    <button
-                      key={source}
-                      type="button"
-                      onClick={() => setSelectedSource(source)}
-                      className={`rounded-full border px-3 py-2 text-xs font-medium transition ${
-                        selectedSource === source
-                          ? "border-foreground bg-foreground text-background"
-                          : "border-border bg-background hover:bg-secondary"
-                      }`}
-                    >
-                      {sourceLabels[source]}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                {selectedMachine?.notes.map((note) => (
-                  <span
-                    key={note}
-                    className="rounded-full border border-border bg-secondary px-3 py-1 text-xs text-muted-foreground"
-                  >
-                    {note}
-                  </span>
                 ))}
               </div>
-            </div>
-
-            <div className="mt-4 rounded-[24px] border border-border bg-[#fafafa]">
-              <div className="flex flex-col gap-3 border-b border-border px-4 py-3">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                  <div>
-                    <div className="text-sm font-semibold">
-                      {sourceLabels[logPayload?.resolvedSource ?? selectedSource]}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {logPayload?.fetchedAt
-                        ? `Fetched ${new Date(logPayload.fetchedAt).toLocaleString()}`
-                        : "Waiting for data"}
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setFollowLog((value) => !value)}
-                      className={`rounded-full border px-3 py-2 text-xs font-medium ${
-                        followLog
-                          ? "border-foreground bg-foreground text-background"
-                          : "border-border bg-background text-muted-foreground"
-                      }`}
-                    >
-                      {followLog ? "Follow log" : "Follow off"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void refreshLogs(false)}
-                      className="rounded-full border border-border bg-background px-3 py-2 text-xs font-medium hover:bg-secondary"
-                    >
-                      Refresh now
-                    </button>
-                    <select
-                      value={lineCount}
-                      onChange={(event) => setLineCount(Number(event.target.value))}
-                      className="rounded-full border border-input bg-background px-3 py-2 text-xs"
-                    >
-                      <option value={160}>160 lines</option>
-                      <option value={240}>240 lines</option>
-                      <option value={320}>320 lines</option>
-                      <option value={400}>400 lines</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  <span className="rounded-full border border-border bg-background px-3 py-1">
-                    {filteredLines.length} lines
-                  </span>
-                  <span className="rounded-full border border-border bg-background px-3 py-1">
-                    resolved: {logPayload?.resolvedSource ?? selectedSource}
-                  </span>
-                  <span className="rounded-full border border-border bg-background px-3 py-1">
-                    updates every 3s
-                  </span>
-                  <span className="rounded-full border border-border bg-background px-3 py-1">
-                    {logLoading ? "refreshing..." : "live"}
-                  </span>
-                  {isDirectBrowserMode() ? (
-                    <span className="rounded-full border border-border bg-background px-3 py-1">
-                      browser direct
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-
-              {logPayload?.note ? (
-                <div className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
-                  {logPayload.note}
-                </div>
-              ) : null}
-
-              <div
-                ref={logViewportRef}
-                className="max-h-[760px] overflow-auto px-2 py-2 font-mono text-[12px] leading-6"
-              >
-                {filteredLines.length ? (
-                  filteredLines.map((line, index) => (
-                    <div
-                      key={`${logPayload?.fetchedAt ?? "initial"}-${index}-${line.slice(0, 32)}`}
-                      className="grid grid-cols-[44px_minmax(0,1fr)] items-start gap-3 rounded-xl px-3 py-1.5 hover:bg-white"
-                    >
-                      <div className="select-none text-right text-[11px] text-muted-foreground">
-                        {index + 1}
-                      </div>
-                      <div className="whitespace-pre-wrap break-words text-foreground">
-                        {line}
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="px-3 py-6 text-sm text-muted-foreground">
-                    No lines match the current search.
-                  </div>
-                )}
-              </div>
-            </div>
+            ) : null}
           </section>
 
-          <aside className="space-y-6">
-            <section className="rounded-[28px] border border-border bg-card p-4 shadow-[0_14px_40px_rgba(15,23,42,0.04)]">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  Snapshot
-                </div>
-                <span className="rounded-full border status-info px-2 py-1 text-[11px]">
-                  {overview.aggregatorUrl}
-                </span>
-              </div>
-              <div className="mt-4 space-y-3">
-                <JsonBlock label="Health" value={overview.health} />
-                <JsonBlock
-                  label="Fleet stats"
-                  value={(overview.fleetStatus?.stats as Record<string, unknown>) ?? null}
-                />
-                <JsonBlock
-                  label="Warnings"
-                  value={overview.warnings.length ? overview.warnings : null}
-                />
-                <InfoBlock label="Mini logs" value="agent.err, agent.log, nic.log, nic.err" />
-                <InfoBlock label="Extra files" value="agent_tail.err, transfers.csv" />
-              </div>
-            </section>
-          </aside>
+          <FleetSection
+            title="Mac Minis"
+            countLabel={`${machines.filter((machine) => machine.kind === "mini").length} total`}
+            cards={machines
+              .filter((machine) => machine.kind === "mini")
+              .map((machine) => ({
+                machine,
+                item: machineBoard[machine.name],
+                history: machineHistory[machine.name],
+              }))}
+          />
+
+          <FleetSection
+            title="Servers"
+            countLabel={`${machines.filter((machine) => machine.kind === "server").length} total`}
+            cards={machines
+              .filter((machine) => machine.kind === "server")
+              .map((machine) => ({
+                machine,
+                item: machineBoard[machine.name],
+                history: machineHistory[machine.name],
+              }))}
+          />
+
+          {aggregatorMachine ? (
+            <FleetSection
+              title="Aggregator"
+              countLabel={getHostLabel(overview.aggregatorUrl)}
+              cards={[
+                {
+                  machine: aggregatorMachine,
+                  item: {
+                    machineName: aggregatorMachine.name,
+                    status: statusTone,
+                    headline: `Aggregator ${aggregatorStatus}`,
+                    detail: overview.warnings[0] || "Fleet-wide monitor",
+                    loading: false,
+                  },
+                  history: machineHistory[aggregatorMachine.name],
+                },
+              ]}
+            />
+          ) : null}
         </section>
       </div>
     </main>
@@ -590,38 +631,142 @@ function MetricCard({
           : "status-neutral";
 
   return (
-    <div className="rounded-2xl border border-border bg-background px-3 py-3">
+    <div className="rounded-[22px] border border-border bg-white px-3 py-3">
       <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">{label}</div>
       <div className="mt-2 flex items-center gap-2">
         <span className={`h-2.5 w-2.5 rounded-full border ${toneClass}`} />
-        <span className="text-lg font-semibold tracking-[-0.02em]">{value}</span>
+        <span className="font-display text-lg font-semibold tracking-[-0.03em]">{value}</span>
       </div>
     </div>
   );
 }
 
-function InfoBlock({ label, value }: { label: string; value: string }) {
+function FleetSection({
+  title,
+  countLabel,
+  cards,
+}: {
+  title: string;
+  countLabel: string;
+  cards: Array<{ machine: MachineCatalogEntry; item?: MachineBoardItem; history?: MachineHistoryItem }>;
+}) {
   return (
-    <div className="rounded-2xl border border-border bg-background px-3 py-3">
-      <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{label}</div>
-      <div className="mt-1 font-mono text-[12px] leading-5">{value}</div>
+    <section className="rounded-[28px] border border-white/80 bg-white/95 p-4 shadow-[0_16px_48px_rgba(15,23,42,0.06)] backdrop-blur md:p-5">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+          {title}
+        </div>
+        <span className="rounded-full border border-border bg-background px-2.5 py-1 text-[11px] text-muted-foreground">
+          {countLabel}
+        </span>
+      </div>
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+        {cards.map(({ machine, item, history }) => (
+          <BoardCard
+            key={machine.name}
+            machine={machine}
+            item={item}
+            history={history}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function BoardCard({
+  machine,
+  item,
+  history,
+}: {
+  machine: MachineCatalogEntry;
+  item?: MachineBoardItem;
+  history?: MachineHistoryItem;
+}) {
+  const logContainerRef = useRef<HTMLDivElement | null>(null);
+  const toneClass =
+    item?.status === "error"
+      ? "status-error"
+      : item?.status === "warning"
+        ? "status-warning"
+        : item?.status === "success"
+          ? "status-success"
+          : item?.status === "info"
+            ? "status-info"
+            : "status-neutral";
+
+  const lines = history?.lines.length ? history.lines : ["Loading recent logs…"];
+  const logLineCount = history?.lines.length ?? 0;
+
+  useEffect(() => {
+    const container = logContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [history?.fetchedAt, logLineCount]);
+
+  return (
+    <div className="w-full rounded-[22px] border border-border bg-white px-3 py-3 text-left">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold tracking-[-0.02em]">{machine.name}</div>
+          <div className="text-xs text-muted-foreground">{machine.stationLabel}</div>
+        </div>
+        <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${toneClass}`}>
+          {machine.kind}
+        </span>
+      </div>
+      <div className="mt-3 text-sm font-medium text-foreground">
+        {item?.headline || "Loading status"}
+      </div>
+      <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+        {item?.loading ? "Refreshing machine status…" : item?.detail || "No active issues"}
+      </div>
+      <div className="mt-3 rounded-[18px] border border-border bg-[linear-gradient(180deg,#fbfbfd_0%,#f7f7f8_100%)] px-3 py-2">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+            {sourceLabels[history?.source ?? getDefaultHistorySource(machine)]}
+          </div>
+          <div className="text-[10px] text-muted-foreground">
+            {history?.fetchedAt ? new Date(history.fetchedAt).toLocaleTimeString() : ""}
+          </div>
+        </div>
+        <div
+          ref={logContainerRef}
+          className="max-h-48 space-y-1 overflow-y-auto pr-1 font-mono text-[11px] leading-5"
+        >
+          {lines.map((line, index) => (
+            <div
+              key={`${machine.name}-${index}-${line.slice(0, 24)}`}
+              className={`rounded-xl border px-2 py-1 ${
+                classifyLogLine(line) === "error"
+                  ? "border-[color:var(--error)] bg-[color:var(--error-muted)] text-[color:var(--error-foreground)]"
+                  : classifyLogLine(line) === "warning"
+                    ? "border-[color:var(--warning)] bg-[color:var(--warning-muted)] text-[color:var(--warning-foreground)]"
+                    : classifyLogLine(line) === "success"
+                      ? "border-[color:var(--success)] bg-[color:var(--success-muted)] text-[color:var(--success-foreground)]"
+                      : "border-white bg-white text-foreground"
+              }`}
+            >
+              {line}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
 
-function JsonBlock({
-  label,
-  value,
-}: {
-  label: string;
-  value: Record<string, unknown> | string[] | null;
-}) {
+function CompactStat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-2xl border border-border bg-background px-3 py-3">
+    <div className="rounded-[22px] border border-border bg-background px-3 py-3">
       <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{label}</div>
-      <pre className="mt-2 overflow-auto whitespace-pre-wrap font-mono text-[12px] leading-5">
-        {value ? JSON.stringify(value, null, 2) : "None"}
-      </pre>
+      <div className="font-display mt-1 text-xl font-semibold tracking-[-0.03em]">{value}</div>
     </div>
   );
 }
